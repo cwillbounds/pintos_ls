@@ -10,9 +10,6 @@
 /* Identifies an inode. */
 #define INODE_MAGIC 0x494e4f44
 
-#define DOUBLE_INDIRECT_BLOCKS 1
-#define INDIRECT_TABLE_INDEX 0
-
 #define INDIRECT_POINTERS 128
 
 /* On-disk inode.
@@ -25,6 +22,8 @@ struct inode_disk
     //what do I change this to?
     uint32_t unused[125];               /* Not used. */
     block_sector_t indirect_table;
+    block_sector_t first_level_index;
+    block_sector_t second_level_index;
   };
 
 
@@ -51,8 +50,11 @@ struct inode
     bool removed;                       /* True if deleted, false otherwise. */
     int deny_write_cnt;                 /* 0: writes ok, >0: deny writes. */
     struct inode_disk data;             /* Inode content. */
-    struct indirect_inode two_level;
+    off_t length;
     struct lock *inode_lock;
+    block_sector_t indirect_table;
+    block_sector_t first_level_index;
+    block_sector_t second_level_index;
   };
 
 /* Returns the block device sector that contains byte offset POS
@@ -163,8 +165,13 @@ inode_open (block_sector_t sector)
   inode->open_cnt = 1;
   inode->deny_write_cnt = 0;
   inode->removed = false;
+  struct inode_disk inode_data;
   lock_init(&inode->inode_lock);
-  block_read (fs_device, inode->sector, &inode->data);
+  block_read (fs_device, inode->sector, &inode_data);
+  memcpy(inode-> indirect_table, data.indirect_table, BLOCK_SECTOR_SIZE);
+  inode -> length = inode_data.length;
+  inode -> first_level_index = inode_data.first_level_index;
+  inode -> second_level_index = inode_data.second_level_index;
   return inode;
 }
 
@@ -292,6 +299,9 @@ inode_write_at (struct inode *inode, const void *buffer_, off_t size,
   if (inode->deny_write_cnt)
     return 0;
 
+  if(size + offset > inode->length)
+    inode_grow(inode, size + offset);
+
   while (size > 0) 
     {
       /* Sector to write, starting byte offset within sector. */
@@ -369,4 +379,58 @@ off_t
 inode_length (const struct inode *inode)
 {
   return inode->data.length;
+}
+
+/* Expands the inode. */
+void
+inode_grow (struct inode *inode, off_t addition)
+{
+  struct indirect_inode first_level_block;
+  size_t new_sectors = bytes_to_data_sectors(addition) - \ bytes_to_data_sectors(inode->length);
+  if (inode->double_indirect_index == 0 && inode->indirect_index == 0)
+    {
+      free_map_allocate(1, &inode->indirect table);
+    }
+  else
+    {
+      block_read(fs_device, inode->pointers[inode->direct_index], &first_level_block);
+    }
+  while (inode->indirect_index < INDIRECT_POINTERS && new_sectors != 0)
+    {
+      new_sectors = level_two(inode, &first_level_block, new_sectors);
+    }
+  block_write(fs_device, inode->pointers[inode->direct_index], &first_level_block);
+  
+  //get back addition - new_sectors * 512
+  inode -> length = addition - (new_sectors * BLOCK_SECTOR_SIZE);
+}
+
+
+size_t
+level_two(struct inode *inode, struct indirect_inode* first_level_block, size_t new_sectors)
+{
+  struct indirect_inode second_level_block;
+  char filler[BLOCK_SECTOR_SIZE];
+  if (inode->double_indirect_index == 0)
+    {
+      free_map_allocate(1, &outer_block->pointers[inode->indirect_index]);
+    }
+  else
+    {
+      block_read(fs_device, outer_block->pointers[inode->indirect_index], &second_level_block);
+    }
+  while (inode->double_indirect_index < INDIRECT_POINTERS && new_sectors != 0)
+    {
+      free_map_allocate(1, &second_level_block.pointers[inode->double_indirect_index]);
+      block_write(fs_device, second_level_block.pointers[inode->double_indirect_index], filler);
+      inode->double_indirect_index++;
+      new_sectors--;
+    }
+  block_write(fs_device, outer_block->pointers[inode->indirect_index], &second_level_block);
+  if (inode->double_indirect_index == INDIRECT_POINTERS)
+    {
+      inode->double_indirect_index = 0;
+      inode->indirect_index++;
+    }
+  return new_sectors;
 }
